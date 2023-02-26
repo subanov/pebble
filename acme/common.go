@@ -12,12 +12,14 @@ const (
 	StatusReady       = "ready"
 	StatusDeactivated = "deactivated"
 
-	IdentifierDNS = "dns"
-	IdentifierIP  = "ip"
+	IdentifierDNS   = "dns"
+	IdentifierIP    = "ip"
+	IdentifierPHONE = "phone"
 
 	ChallengeHTTP01    = "http-01"
 	ChallengeTLSALPN01 = "tls-alpn-01"
 	ChallengeDNS01     = "dns-01"
+	ChallengePHONE     = "phone-01"
 
 	HTTP01BaseURL = ".well-known/acme-challenge/"
 

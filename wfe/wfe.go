@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"math/big"
@@ -39,7 +40,7 @@ const (
 	// Note: We deliberately pick endpoint paths that differ from Boulder to
 	// exercise clients processing of the /directory response
 	// We export the DirectoryPath so that the pebble binary can reference it
-	DirectoryPath     = "/dir"
+	DirectoryPath     = "/directory"
 	noncePath         = "/nonce-plz"
 	newAccountPath    = "/sign-me-up"
 	acctPath          = "/my-account/"
@@ -292,14 +293,57 @@ func (wfe *WebFrontEndImpl) HandleFunc(
 
 				wfe.log.Printf("%s %s -> calling handler()\n", request.Method, pattern)
 
+				wfe.log.Print("req headers: \n")
+				for k, v := range request.Header {
+					wfe.log.Printf("%s: %s", k, v)
+				}
+				body, _ := io.ReadAll(request.Body)
+				wfe.log.Printf("request pattern: %s, body: \n%s", pattern, string(body))
+				// Replace the body with a new reader after reading from the original
+				request.Body = io.NopCloser(bytes.NewBuffer(body))
+
 				// TODO(@cpu): Configurable request timeout
 				timeout := 1 * time.Minute
 				ctx, cancel := context.WithTimeout(ctx, timeout)
-				handler(ctx, response, request)
-				cancel()
+				defer cancel()
+
+				wfe.log.Print("response: \n")
+				handler(ctx, NewLoggedResponseWriter(wfe, response), request)
+				header := response.Header()
+
+				wfe.log.Print("resp headers: \n")
+				for k, v := range header {
+					wfe.log.Printf("%s: %s", k, v)
+				}
 			},
 			)})
 	mux.Handle(pattern, defaultHandler)
+}
+
+type LoggedResponseWriter struct {
+	wfe      *WebFrontEndImpl
+	response http.ResponseWriter
+}
+
+func NewLoggedResponseWriter(wfe *WebFrontEndImpl, response http.ResponseWriter) *LoggedResponseWriter {
+	return &LoggedResponseWriter{wfe: wfe, response: response}
+}
+
+func (lr *LoggedResponseWriter) WriteHeader(statusCode int) {
+	lr.wfe.log.Printf("status code: %d", statusCode)
+	lr.response.WriteHeader(statusCode)
+}
+
+func (lr *LoggedResponseWriter) Header() http.Header {
+	return lr.response.Header()
+}
+
+func (lr *LoggedResponseWriter) Write(data []byte) (int, error) {
+	d, err := lr.response.Write(data)
+	if err == nil {
+		lr.wfe.log.Print(string(data))
+	}
+	return d, err
 }
 
 // processCORS reads and writes all necessary request and response headers in order to
@@ -623,7 +667,8 @@ func (wfe *WebFrontEndImpl) relativeEndpoint(request *http.Request, endpoint str
 func (wfe *WebFrontEndImpl) Nonce(
 	ctx context.Context,
 	response http.ResponseWriter,
-	request *http.Request) {
+	request *http.Request,
+) {
 	statusCode := http.StatusNoContent
 	// The ACME specification says GET requets should receive http.StatusNoContent
 	// and HEAD requests should receive http.StatusOK.
@@ -1416,22 +1461,23 @@ func (wfe *WebFrontEndImpl) verifyOrder(order *core.Order) *acme.ProblemDetails 
 	// Check that all of the identifiers in the new-order are DNS or IPaddress type
 	// Validity check of ipaddresses are done here.
 	for _, ident := range idents {
-		if ident.Type == acme.IdentifierIP {
+		switch ident.Type {
+		case acme.IdentifierIP:
 			if net.ParseIP(ident.Value) == nil {
 				return acme.MalformedProblem(fmt.Sprintf(
 					"Order included malformed IP type identifier value: %q\n",
 					ident.Value))
 			}
+		case acme.IdentifierDNS:
+			if problem := wfe.validateDNSName(ident); problem != nil {
+				return problem
+			}
+		case acme.IdentifierPHONE:
 			continue
-		}
-		if ident.Type != acme.IdentifierDNS {
+		default:
 			return acme.MalformedProblem(fmt.Sprintf(
 				"Order included unsupported type identifier: type %q, value %q",
 				ident.Type, ident.Value))
-		}
-
-		if problem := wfe.validateDNSName(ident); problem != nil {
-			return problem
 		}
 	}
 	return nil
@@ -1597,11 +1643,13 @@ func (wfe *WebFrontEndImpl) makeChallenges(authz *core.Authorization, request *h
 	} else {
 		// IP addresses get HTTP-01 and TLS-ALPN challenges
 		var enabledChallenges []string
-		if authz.Identifier.Type == acme.IdentifierIP {
+		switch authz.Identifier.Type {
+		case acme.IdentifierIP:
 			enabledChallenges = []string{acme.ChallengeHTTP01, acme.ChallengeTLSALPN01}
-		} else {
-			// Non-wildcard, non-IP identifier authorizations get all of the enabled challenge types
+		case acme.IdentifierDNS:
 			enabledChallenges = []string{acme.ChallengeHTTP01, acme.ChallengeTLSALPN01, acme.ChallengeDNS01}
+		case acme.IdentifierPHONE:
+			enabledChallenges = []string{acme.ChallengePHONE}
 		}
 		for _, chalType := range enabledChallenges {
 			chal, err := wfe.makeChallenge(chalType, authz, request)
@@ -1648,12 +1696,15 @@ func (wfe *WebFrontEndImpl) NewOrder(
 
 	var orderDNSs []string
 	var orderIPs []net.IP
+	var orderPhones []string
 	for _, ident := range newOrder.Identifiers {
 		switch ident.Type {
 		case acme.IdentifierDNS:
 			orderDNSs = append(orderDNSs, ident.Value)
 		case acme.IdentifierIP:
 			orderIPs = append(orderIPs, net.ParseIP(ident.Value))
+		case acme.IdentifierPHONE:
+			orderPhones = append(orderPhones, ident.Value)
 		default:
 			wfe.sendError(acme.MalformedProblem(
 				fmt.Sprintf("Order includes unknown identifier type %s", ident.Type)), response)
@@ -1662,12 +1713,15 @@ func (wfe *WebFrontEndImpl) NewOrder(
 	}
 	orderDNSs = uniqueLowerNames(orderDNSs)
 	orderIPs = uniqueIPs(orderIPs)
-	var uniquenames []acme.Identifier
+	var orderIdentifiers []acme.Identifier
 	for _, name := range orderDNSs {
-		uniquenames = append(uniquenames, acme.Identifier{Value: name, Type: acme.IdentifierDNS})
+		orderIdentifiers = append(orderIdentifiers, acme.Identifier{Value: name, Type: acme.IdentifierDNS})
 	}
 	for _, ip := range orderIPs {
-		uniquenames = append(uniquenames, acme.Identifier{Value: ip.String(), Type: acme.IdentifierIP})
+		orderIdentifiers = append(orderIdentifiers, acme.Identifier{Value: ip.String(), Type: acme.IdentifierIP})
+	}
+	for _, phone := range orderPhones {
+		orderIdentifiers = append(orderIdentifiers, acme.Identifier{Value: phone, Type: acme.IdentifierPHONE})
 	}
 	expires := time.Now().AddDate(0, 0, 1)
 	order := &core.Order{
@@ -1678,7 +1732,7 @@ func (wfe *WebFrontEndImpl) NewOrder(
 			Expires: expires.UTC().Format(time.RFC3339),
 			// Only the Identifiers, NotBefore and NotAfter from the submitted order
 			// are carried forward
-			Identifiers: uniquenames,
+			Identifiers: orderIdentifiers,
 			NotBefore:   newOrder.NotBefore,
 			NotAfter:    newOrder.NotAfter,
 		},
@@ -1916,6 +1970,7 @@ func (wfe *WebFrontEndImpl) FinalizeOrder(
 
 	// split order identifiers per types
 	var orderDNSs []string
+	var orderPhones []string
 	var orderIPs []net.IP
 	for _, ident := range orderIdentifiers {
 		switch ident.Type {
@@ -1923,6 +1978,8 @@ func (wfe *WebFrontEndImpl) FinalizeOrder(
 			orderDNSs = append(orderDNSs, ident.Value)
 		case acme.IdentifierIP:
 			orderIPs = append(orderIPs, net.ParseIP(ident.Value))
+		case acme.IdentifierPHONE:
+			orderPhones = append(orderPhones, ident.Value)
 		default:
 			wfe.sendError(acme.MalformedProblem(
 				fmt.Sprintf("Order includes unknown identifier type %s", ident.Type)), response)
@@ -2237,7 +2294,10 @@ func (wfe *WebFrontEndImpl) validateAuthzForChallenge(authz *core.Authorization)
 	defer authz.RUnlock()
 
 	ident := authz.Identifier
-	if ident.Type != acme.IdentifierDNS && ident.Type != acme.IdentifierIP {
+	switch ident.Type {
+	case acme.IdentifierDNS, acme.IdentifierIP, acme.IdentifierPHONE:
+		// These are the only supported identifier types
+	default:
 		return nil, acme.MalformedProblem(
 			fmt.Sprintf("Authorization identifier was type %s, only %s and %s are supported",
 				ident.Type, acme.IdentifierDNS, acme.IdentifierIP))

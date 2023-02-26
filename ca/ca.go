@@ -251,15 +251,15 @@ func (ca *CAImpl) newChain(intermediateKey crypto.Signer, intermediateSubject pk
 	return c
 }
 
-func (ca *CAImpl) newCertificate(domains []string, ips []net.IP, key crypto.PublicKey, accountID, notBefore, notAfter string) (*core.Certificate, error) {
-	var cn string
-	if len(domains) > 0 {
-		cn = domains[0]
-	} else if len(ips) > 0 {
-		cn = ips[0].String()
-	} else {
-		return nil, fmt.Errorf("must specify at least one domain name or IP address")
-	}
+func (ca *CAImpl) newCertificate(csr *x509.CertificateRequest, accountID, notBefore, notAfter string) (*core.Certificate, error) {
+	cn := csr.Subject.CommonName
+	// if len(domains) > 0 {
+	// 	cn = domains[0]
+	// } else if len(ips) > 0 {
+	// 	cn = ips[0].String()
+	// } else {
+	// 	return nil, fmt.Errorf("must specify at least one domain name or IP address")
+	// }
 
 	defaultChain := ca.chains[0].intermediates
 	if len(defaultChain) == 0 || defaultChain[0].cert == nil {
@@ -267,7 +267,7 @@ func (ca *CAImpl) newCertificate(domains []string, ips []net.IP, key crypto.Publ
 	}
 	issuer := defaultChain[0]
 
-	subjectKeyID, err := makeSubjectKeyID(key)
+	subjectKeyID, err := makeSubjectKeyID(csr.PublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create subject key ID: %s", err.Error())
 	}
@@ -294,10 +294,15 @@ func (ca *CAImpl) newCertificate(domains []string, ips []net.IP, key crypto.Publ
 
 	serial := makeSerial()
 	template := &x509.Certificate{
-		DNSNames:    domains,
-		IPAddresses: ips,
+		DNSNames:    []string{},
+		IPAddresses: []net.IP{},
 		Subject: pkix.Name{
-			CommonName: cn,
+			CommonName:         cn,
+			Country:            csr.Subject.Country,
+			Organization:       csr.Subject.Organization,
+			OrganizationalUnit: csr.Subject.OrganizationalUnit,
+			Locality:           csr.Subject.Locality,
+			Province:           csr.Subject.Province,
 		},
 		SerialNumber: serial,
 		NotBefore:    certNotBefore,
@@ -314,7 +319,7 @@ func (ca *CAImpl) newCertificate(domains []string, ips []net.IP, key crypto.Publ
 		template.OCSPServer = []string{ca.ocspResponderURL}
 	}
 
-	der, err := x509.CreateCertificate(rand.Reader, template, issuer.cert.Cert, key, issuer.key)
+	der, err := x509.CreateCertificate(rand.Reader, template, issuer.cert.Cert, csr.PublicKey, issuer.key)
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +411,7 @@ func (ca *CAImpl) CompleteOrder(order *core.Order) {
 
 	// issue a certificate for the csr
 	csr := order.ParsedCSR
-	cert, err := ca.newCertificate(csr.DNSNames, csr.IPAddresses, csr.PublicKey, order.AccountID, order.NotBefore, order.NotAfter)
+	cert, err := ca.newCertificate(csr, order.AccountID, order.NotBefore, order.NotAfter)
 	if err != nil {
 		ca.log.Printf("Error: unable to issue order: %s", err.Error())
 		return

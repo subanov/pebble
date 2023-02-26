@@ -1,4 +1,5 @@
 version: '3'
+name: letssign-pebble
 services:
   pebble:
     image: letsencrypt/pebble:latest
