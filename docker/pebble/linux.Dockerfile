@@ -1,4 +1,4 @@
-FROM golang:1.18-alpine as builder
+FROM golang:1.20.1-alpine as builder
 
 ENV CGO_ENABLED=0
 
@@ -8,7 +8,9 @@ COPY . .
 RUN go build -o /go/bin/pebble ./cmd/pebble
 
 ## main
-FROM alpine:3.15.4
+FROM alpine:3.17.2
+
+RUN apk add --no-cache curl
 
 COPY --from=builder /go/bin/pebble /usr/bin/pebble
 COPY --from=builder /pebble-src/test/ /test/

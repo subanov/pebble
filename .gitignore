@@ -36,4 +36,6 @@ tags
 # IDE support files
 .idea
 
+# vscode support files
 .vscode/*
+__debug_bin

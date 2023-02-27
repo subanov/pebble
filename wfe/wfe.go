@@ -950,11 +950,7 @@ func (wfe *WebFrontEndImpl) verifyJWS(
 		return nil, acme.BadNonceProblem("JWS has no anti-replay nonce")
 	}
 
-	// Roll a random number between 0 and 100.
-	nonceRoll := rand.Intn(100)
-	// If the nonce is not valid OR if the nonceRoll was less than the
-	// nonceErrPercent, fail with an error
-	if !wfe.nonce.validNonce(nonce) || nonceRoll < wfe.nonceErrPercent {
+	if !wfe.nonce.validNonce(nonce) {
 		return nil, acme.BadNonceProblem(fmt.Sprintf(
 			"JWS has an invalid anti-replay nonce: %s", nonce))
 	}
